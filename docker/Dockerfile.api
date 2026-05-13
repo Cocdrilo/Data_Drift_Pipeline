@@ -1,0 +1,24 @@
+# Usamos una versión ligera de Python 3.10
+FROM python:3.10-slim
+
+# Le decimos a Docker que trabaje dentro de la carpeta /app
+WORKDIR /app
+
+# Copiamos el archivo de dependencias y las instalamos
+COPY requirements.txt .
+RUN apt-get update && apt-get install -y --no-install-recommends wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir -r requirements.txt
+
+# Copiamos todo el código de tu proyecto dentro del contenedor
+COPY . /app/
+
+# Le decimos a Python dónde buscar los módulos
+ENV PYTHONPATH=/app
+
+# Exponemos el puerto 8000 para que podamos acceder a la web
+EXPOSE 8000
+
+# Comando para iniciar FastAPI (Ajusta la ruta si tu app.py está en otra carpeta,
+# por ejemplo: src.serving.app:app si seguiste la estructura del README)
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

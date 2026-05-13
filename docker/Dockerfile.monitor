@@ -1,0 +1,14 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN apt-get update && apt-get install -y --no-install-recommends wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir -r requirements.txt
+
+COPY . /app/
+ENV PYTHONPATH=/app
+
+# Comando para iniciar el monitor (Ajusta la ruta igual que arriba si está en src/monitoring/)
+CMD ["python", "monitor.py"]

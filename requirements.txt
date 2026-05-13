@@ -1,0 +1,11 @@
+pandas
+numpy
+scikit-learn
+mlflow
+evidently==0.4.33
+fastapi
+uvicorn
+pydantic
+prometheus_client
+schedule
+scipy

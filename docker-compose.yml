@@ -1,0 +1,188 @@
+# =============================================================================
+# MLOps Drift Pipeline — Docker Compose Orchestration
+# Services: FastAPI · MLflow · Prometheus · Pushgateway · Grafana · Monitor
+# =============================================================================
+
+x-common-env: &common-env
+  MLFLOW_TRACKING_URI: http://mlflow:5000
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+
+# ---------------------------------------------------------------------------
+# Shared volume definitions
+# ---------------------------------------------------------------------------
+volumes:
+  mlflow_data:       # MLflow artifact store & SQLite DB
+  prometheus_data:   # Prometheus time-series storage
+  grafana_data:      # Grafana dashboards & state
+  app_logs:          # Shared log volume (RF-10)
+  app_reports:       # HTML reports from Evidently
+  app_data:          # Shared reference/production data
+
+# ---------------------------------------------------------------------------
+# Network isolation
+# ---------------------------------------------------------------------------
+networks:
+  mlops_net:
+    driver: bridge
+
+# =============================================================================
+# Services
+# =============================================================================
+services:
+
+  # ---------------------------------------------------------------------------
+  # MLflow Tracking Server (RF-06)
+  # ---------------------------------------------------------------------------
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.12.0
+    container_name: mlflow
+    restart: unless-stopped
+    environment:
+      MLFLOW_SERVER_ALLOWED_HOSTS: "mlflow,mlflow:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000"
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+      --port 5000
+
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    networks:
+      - mlops_net
+    healthcheck:
+      # Pure Python TCP check — works regardless of which HTTP endpoints MLflow exposes.
+      # Connects to port 5000; succeeds as soon as gunicorn is accepting connections.
+      test: ["CMD-SHELL", "python -c \"import socket; s=socket.socket(); s.settimeout(3); s.connect(('localhost', 5000)); s.close()\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # FastAPI Prediction Service (RF-09)
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: api
+    restart: unless-stopped
+    command: uvicorn src.serving.app:app --host 0.0.0.0 --port 8000
+    environment:
+      <<: *common-env
+      MODEL_NAME: random-forest-classifier
+      MODEL_ALIAS: champion
+    ports:
+      - "8000:8000"
+    volumes:
+      - app_logs:/app/logs
+      - mlflow_data:/mlflow
+      - ./data:/app/data
+    networks:
+      - mlops_net
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/health || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Drift Monitor (RF-01 – RF-05, RF-08, RF-10)
+  # ---------------------------------------------------------------------------
+  monitor:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.monitor
+    container_name: monitor
+    restart: unless-stopped
+    command: python src/monitoring/monitor.py
+    environment:
+      <<: *common-env
+      MONITOR_MODE: scheduled
+      MONITOR_INTERVAL_MINUTES: "5"
+      PUSHGATEWAY_URL: http://pushgateway:9091
+    volumes:
+      - app_logs:/app/logs
+      - ./data:/app/data
+      - ./reports:/app/reports
+    networks:
+      - mlops_net
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      pushgateway:
+        condition: service_started
+
+  # ---------------------------------------------------------------------------
+  # Prometheus (RF-08)
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - mlops_net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Prometheus Pushgateway — receives metrics from the monitor batch job
+  # ---------------------------------------------------------------------------
+  pushgateway:
+    image: prom/pushgateway:v1.8.0
+    container_name: pushgateway
+    restart: unless-stopped
+    ports:
+      - "9091:9091"
+    networks:
+      - mlops_net
+
+  # ---------------------------------------------------------------------------
+  # Grafana (RF-08)
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.0.0
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin123}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: http://localhost:3000
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - mlops_net
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 3

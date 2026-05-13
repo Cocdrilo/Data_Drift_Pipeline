@@ -1,0 +1,300 @@
+# =============================================================================
+# GitHub Actions — MLOps Pipeline CI/CD (RF-07)
+#
+# Stages:
+#   1. lint        — Ruff + mypy static analysis
+#   2. test        — pytest with coverage
+#   3. build       — Docker image build & push (GHCR)
+#   4. integration — Smoke tests against the built API image
+#   5. deploy      — Simulated production deployment (replace with real target)
+# =============================================================================
+
+name: MLOps Pipeline CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Nightly run to catch dependency regressions
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      deploy_env:
+        description: "Target environment"
+        required: true
+        default: "staging"
+        type: choice
+        options: [staging, production]
+
+# Cancel previous runs on the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BASE: ${{ github.repository_owner }}/mlops-drift-pipeline
+  PYTHON_VERSION: "3.11"
+
+# =============================================================================
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # 1. LINT
+  # ---------------------------------------------------------------------------
+  lint:
+    name: "Lint & Type Check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install lint dependencies
+        run: |
+          pip install --upgrade pip
+          pip install ruff mypy types-requests
+
+      - name: Ruff lint
+        run: ruff check src/ tests/
+
+      - name: Ruff format check
+        run: ruff format --check src/ tests/
+
+      - name: mypy type check
+        run: mypy src/ --ignore-missing-imports --no-strict-optional
+
+  # ---------------------------------------------------------------------------
+  # 2. TEST
+  # ---------------------------------------------------------------------------
+  test:
+    name: "Unit & Integration Tests"
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-asyncio httpx
+
+      - name: Run tests with coverage
+        run: |
+          pytest tests/ \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --junitxml=reports/junit.xml \
+            -v
+        env:
+          MLFLOW_TRACKING_URI: "file:///tmp/mlflow_test"
+
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v4
+        if: matrix.python-version == '3.11'
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+
+      - name: Upload JUnit results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.python-version }}
+          path: reports/junit.xml
+
+  # ---------------------------------------------------------------------------
+  # 3. BUILD — Docker images
+  # ---------------------------------------------------------------------------
+  build:
+    name: "Build & Push Docker Images"
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      api_image: ${{ steps.meta_api.outputs.tags }}
+      monitor_image: ${{ steps.meta_monitor.outputs.tags }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-platform)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---- API image ----
+      - name: Docker metadata (API)
+        id: meta_api
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}-api
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build & push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.api
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta_api.outputs.tags }}
+          labels: ${{ steps.meta_api.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+      # ---- Monitor image ----
+      - name: Docker metadata (Monitor)
+        id: meta_monitor
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}-monitor
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build & push Monitor image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.monitor
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta_monitor.outputs.tags }}
+          labels: ${{ steps.meta_monitor.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  # 4. INTEGRATION SMOKE TEST
+  # ---------------------------------------------------------------------------
+  integration:
+    name: "Integration Smoke Tests"
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: pip install httpx pytest pytest-asyncio
+
+      - name: Start services (docker-compose)
+        run: |
+          docker compose up -d mlflow
+          docker compose up -d api
+          # Wait for services to be ready
+          timeout 120 bash -c 'until curl -sf http://localhost:8000/health; do sleep 3; done'
+          timeout 60  bash -c 'until curl -sf http://localhost:5000/health; do sleep 3; done'
+        env:
+          MLFLOW_TRACKING_URI: http://localhost:5000
+
+      - name: Run smoke tests
+        run: pytest tests/integration/ -v -x
+        env:
+          API_BASE_URL: "http://localhost:8000"
+
+      - name: Collect container logs on failure
+        if: failure()
+        run: |
+          docker compose logs api > /tmp/api_logs.txt 2>&1 || true
+          docker compose logs mlflow > /tmp/mlflow_logs.txt 2>&1 || true
+
+      - name: Upload failure logs
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: container-logs
+          path: /tmp/*.txt
+
+      - name: Tear down services
+        if: always()
+        run: docker compose down -v
+
+  # ---------------------------------------------------------------------------
+  # 5. DEPLOY (simulated)
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: "Deploy to ${{ github.event.inputs.deploy_env || 'staging' }}"
+    runs-on: ubuntu-latest
+    needs: [build, integration]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    environment:
+      name: ${{ github.event.inputs.deploy_env || 'staging' }}
+      url: https://staging.example.com   # Replace with your actual URL
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deployment summary
+        run: |
+          echo "=== Deployment Summary ==="
+          echo "Environment : ${{ github.event.inputs.deploy_env || 'staging' }}"
+          echo "API image   : ${{ needs.build.outputs.api_image }}"
+          echo "Monitor img : ${{ needs.build.outputs.monitor_image }}"
+          echo "Commit SHA  : ${{ github.sha }}"
+          echo "Triggered by: ${{ github.actor }}"
+          echo "=========================="
+
+      - name: Simulate deployment
+        run: |
+          echo "[DEPLOY] Pulling new images on target cluster …"
+          echo "[DEPLOY] Rolling update: api service …"
+          echo "[DEPLOY] Rolling update: monitor service …"
+          echo "[DEPLOY] Health checks passing. Deployment complete."
+          # TODO: Replace with real deployment step, e.g.:
+          # - kubectl set image deployment/api api=<image>
+          # - helm upgrade --install mlops-pipeline ./helm/chart --set image.tag=$TAG
+          # - aws ecs update-service ...
+
+      - name: Notify on success
+        run: |
+          echo "Deployment to ${{ github.event.inputs.deploy_env || 'staging' }} succeeded."
+          # TODO: Add Slack/Teams/PagerDuty notification here
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "Deployment FAILED. Check logs above."
+          # TODO: Send failure alert
