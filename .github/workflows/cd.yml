@@ -1,16 +1,17 @@
 name: CD Pipeline (Docker Build & Push)
 
-# 1. ¿Cuándo se ejecuta? Solo cuando el código llega a la rama 'main'
-# (No queremos subir imágenes a producción si es solo un Pull Request de prueba)
 on:
   push:
     branches: [ "main", "master" ]
+
+# 1. Silenciamos el warning forzando el uso del motor moderno (Node 24)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
 
-    # 2. Damos permisos a la máquina para escribir en tu registro de paquetes
     permissions:
       contents: read
       packages: write
@@ -19,7 +20,6 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 3. Iniciamos sesión en GHCR (GitHub Container Registry)
     - name: Log in to GitHub Container Registry
       uses: docker/login-action@v3
       with:
@@ -27,22 +27,23 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
-    # 4. Construimos y subimos la imagen de la API
+    # 2. Convertimos el nombre de usuario a minúsculas para cumplir la regla de Docker
+    - name: Convert owner to lowercase
+      run: echo "REPO_OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
     - name: Build and push API image
       uses: docker/build-push-action@v5
       with:
         context: .
         file: docker/Dockerfile.api
         push: true
-        # Se guardará como: ghcr.io/tu-usuario/data-drift-api:latest
-        tags: ghcr.io/${{ github.repository_owner }}/data-drift-api:latest
+        # 3. Usamos la nueva variable en minúsculas (env.REPO_OWNER)
+        tags: ghcr.io/${{ env.REPO_OWNER }}/data-drift-api:latest
 
-    # 5. Construimos y subimos la imagen del Monitor
     - name: Build and push Monitor image
       uses: docker/build-push-action@v5
       with:
         context: .
         file: docker/Dockerfile.monitor
         push: true
-        # Se guardará como: ghcr.io/tu-usuario/data-drift-monitor:latest
-        tags: ghcr.io/${{ github.repository_owner }}/data-drift-monitor:latest
+        tags: ghcr.io/${{ env.REPO_OWNER }}/data-drift-monitor:latest
