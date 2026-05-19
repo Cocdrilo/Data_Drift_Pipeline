@@ -9,3 +9,4 @@ pydantic
 prometheus_client
 schedule
 scipy
+requests

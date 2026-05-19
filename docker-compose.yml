@@ -76,6 +76,8 @@ services:
       <<: *common-env
       MODEL_NAME: random-forest-classifier
       MODEL_ALIAS: champion
+      GITHUB_PAT: ${GITHUB_PAT}
+      GITHUB_REPO: ${GITHUB_REPO}
     ports:
       - "8000:8000"
     volumes:
@@ -137,6 +139,7 @@ services:
       - "9090:9090"
     volumes:
       - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/alert.rules.yml:/etc/prometheus/alert.rules.yml:ro   # <--- NUEVO: Pasamos las reglas
       - prometheus_data:/prometheus
     networks:
       - mlops_net
@@ -186,3 +189,17 @@ services:
       interval: 20s
       timeout: 5s
       retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Alertmanager - Gestor de alertas de Prometheus
+  # ---------------------------------------------------------------------------
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: alertmanager
+    restart: unless-stopped
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./config/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    networks:
+      - mlops_net

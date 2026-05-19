@@ -1,0 +1,13 @@
+groups:
+  - name: drift_alerts
+    rules:
+      - alert: CriticalDataDrift
+        # La condición matemática: Si la métrica es 2...
+        expr: drift_alert_level == 2
+        # ...durante 15 minutos seguidos (Para pruebas puedes bajarlo a 1m)
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Deriva Crítica de Datos Detectada"
+          description: "El modelo ha detectado drift continuo durante 15 minutos. Requiere reentrenamiento."

@@ -1,0 +1,11 @@
+route:
+  receiver: 'fastapi_translator'
+  group_wait: 10s
+  group_interval: 5m
+  repeat_interval: 1h
+
+receivers:
+  - name: 'fastapi_translator'
+    webhook_configs:
+      # Cuando salte la alarma, Alertmanager enviará un POST a nuestra API
+      - url: 'http://api:8000/webhook/alertmanager'

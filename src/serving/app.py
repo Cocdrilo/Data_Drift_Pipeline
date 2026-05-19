@@ -3,10 +3,12 @@ FastAPI serving application for the drift mitigation pipeline.
 
 Loads the latest champion model from the MLflow Model Registry and
 exposes a /predict endpoint along with health and metadata endpoints.
+Includes webhook listeners for automated continuous training.
 """
 
 import logging
 import os
+import requests
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -16,7 +18,7 @@ import mlflow.sklearn
 import numpy as np
 import pandas as pd
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Request, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
@@ -185,6 +187,61 @@ class BatchPredictResponse(BaseModel):
     predictions: list[PredictResponse]
     count: int
     model_version: str | None
+
+
+# ---------------------------------------------------------------------------
+# Continuous Training & Webhooks
+# ---------------------------------------------------------------------------
+
+def trigger_github_retraining() -> None:
+    """Call the GitHub API to initiate the retraining workflow."""
+    token = os.getenv("GITHUB_PAT")
+    repo = os.getenv("GITHUB_REPO")
+
+    if not token or not repo:
+        logger.error("GITHUB_PAT or GITHUB_REPO environment variables are not configured.")
+        return
+
+    # Official GitHub URL for triggering Repository Dispatches
+    url = f"https://api.github.com/repos/{repo}/dispatches"
+
+    headers = {
+        "Accept": "application/vnd.github.v3+json",
+        "Authorization": f"token {token}"
+    }
+
+    # This event_type acts as the identifier our GitHub Actions YAML will listen for
+    data = {"event_type": "trigger_retraining"}
+
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=10)
+        if response.status_code == 204:
+            logger.info("Success! Retraining command sent to GitHub Actions.")
+        else:
+            logger.error("Failed to notify GitHub: %s - %s", response.status_code, response.text)
+    except Exception as exc:
+        logger.error("Exception occurred while triggering GitHub: %s", exc)
+
+@app.post("/webhook/alertmanager", tags=["Operations"])
+async def alertmanager_webhook(request: Request, background_tasks: BackgroundTasks) -> dict[str, str]:
+    """Receive alerts from Alertmanager and translate them to GitHub Actions triggers."""
+    payload = await request.json()
+
+    # Alertmanager groups alerts, so we iterate through them
+    for alert in payload.get("alerts", []):
+        status_val = alert.get("status")
+        alert_name = alert.get("labels", {}).get("alertname")
+
+        logger.info("Received Alertmanager alert: %s - %s", alert_name, status_val)
+
+        # Only trigger GitHub if the alert is newly firing and matches our specific drift rule
+        if status_val == "firing" and alert_name == "CriticalDataDrift":
+            logger.warning("Critical Drift confirmed! Initiating background healing protocol...")
+
+            # Launch as a background task to avoid blocking the Alertmanager response
+            background_tasks.add_task(trigger_github_retraining)
+
+    return {"message": "Webhook processed successfully"}
 
 
 # ---------------------------------------------------------------------------
