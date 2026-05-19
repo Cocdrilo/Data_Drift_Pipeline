@@ -1,0 +1,22 @@
+# Git
+.git
+.gitignore
+
+# Entornos virtuales locales
+venv/
+env/
+.venv/
+.conda/
+__pycache__/
+*.pyc
+
+# Datos y bases de datos locales (Docker los monta por volúmenes, no deben ir dentro)
+data/
+mlruns/
+reports/
+logs/
+*.db
+*.sqlite
+
+# Variables de entorno secretas
+.env
