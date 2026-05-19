@@ -4,30 +4,31 @@ on:
   repository_dispatch:
     types: [trigger_retraining]
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   retrain-and-deploy:
-    # LA MAGIA: Le decimos que no use la nube, que use tu ordenador
     runs-on: self-hosted
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 1. Ejecutamos el reentrenamiento REAL
-    # Usamos 'docker exec' para ejecutar el script DENTRO de tu contenedor
-    # 'api' actual, el cual ya tiene acceso a MLflow y al CSV de producción.
     - name: Run Real Model Retraining
       run: |
         echo "Iniciando reentrenamiento real en la máquina local..."
         docker exec api python src/training/train.py
 
-    # 2. Recargamos la API para que empiece a predecir con el nuevo modelo
     - name: Reload API Model
       run: |
         echo "Avisando a la API para que cargue el nuevo modelo en memoria..."
         curl -X POST http://localhost:8000/model/reload
 
-    # 3. Autenticación en GHCR para empaquetar el éxito
+    # --- LA SOLUCIÓN: Configuramos Buildx para el self-hosted runner ---
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
     - name: Log in to GitHub Container Registry
       uses: docker/login-action@v3
       with:
@@ -38,7 +39,6 @@ jobs:
     - name: Convert owner to lowercase
       run: echo "REPO_OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
-    # 4. Construir la imagen con los nuevos pesos y código, y subirla
     - name: Build and push updated API image
       uses: docker/build-push-action@v5
       with:
